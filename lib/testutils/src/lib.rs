@@ -686,6 +686,7 @@ pub fn commit_with_tree(store: &Arc<Store>, tree: MergedTree) -> Commit {
         author: signature.clone(),
         committer: signature,
         secure_sig: None,
+        extra_headers: std::collections::BTreeMap::new(),
     };
     store.write_commit(commit, None).block_on().unwrap()
 }

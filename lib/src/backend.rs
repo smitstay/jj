@@ -215,6 +215,12 @@ pub struct Commit {
     /// A cryptographic signature of this commit.
     #[serde(skip)] // raw data wouldn't be useful
     pub secure_sig: Option<SecureSig>,
+    /// Extra headers attached to the commit object, beyond the set jj writes
+    /// natively (`change-id`, `jj:trees`, `jj:conflict-labels`, `gpgsig`).
+    /// Keys in jj's reserved set are filtered on write and are not populated
+    /// on read (they are parsed into their dedicated fields). Embedders use
+    /// their own prefix (e.g. `glyph:*`) to avoid collisions.
+    pub extra_headers: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 /// An individual copy event, from file A -> B.
@@ -530,6 +536,7 @@ pub fn make_root_commit(root_change_id: ChangeId, empty_tree_id: TreeId) -> Comm
         author: signature.clone(),
         committer: signature,
         secure_sig: None,
+        extra_headers: std::collections::BTreeMap::new(),
     }
 }
 

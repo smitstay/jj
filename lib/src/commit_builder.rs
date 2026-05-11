@@ -160,6 +160,22 @@ impl CommitBuilder<'_> {
         self
     }
 
+    pub fn extra_headers(&self) -> &std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
+        self.inner.extra_headers()
+    }
+
+    /// Set the embedder-supplied extra headers attached to the commit object.
+    /// Keys in jj's reserved set (`change-id`, `gpgsig`, `gpgsig-sha256`,
+    /// `jj:trees`, `jj:conflict-labels`) are filtered out at write time;
+    /// embedders should use a distinct prefix (e.g. `glyph:*`).
+    pub fn set_extra_headers(
+        mut self,
+        extra_headers: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> Self {
+        self.inner.set_extra_headers(extra_headers);
+        self
+    }
+
     pub async fn write(self) -> BackendResult<Commit> {
         self.inner.write(self.mut_repo).await
     }
@@ -207,6 +223,7 @@ impl DetachedCommitBuilder {
             author: signature.clone(),
             committer: signature,
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
         let record_predecessors_in_commit = settings
             .get_bool("experimental.record-predecessors-in-commit")
@@ -391,6 +408,22 @@ impl DetachedCommitBuilder {
 
     pub fn clear_sign_key(&mut self) -> &mut Self {
         self.sign_settings.key = None;
+        self
+    }
+
+    pub fn extra_headers(&self) -> &std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
+        &self.commit.extra_headers
+    }
+
+    /// Set the embedder-supplied extra headers attached to the commit object.
+    /// Keys in jj's reserved set (`change-id`, `gpgsig`, `gpgsig-sha256`,
+    /// `jj:trees`, `jj:conflict-labels`) are filtered out at write time;
+    /// embedders should use a distinct prefix (e.g. `glyph:*`).
+    pub fn set_extra_headers(
+        &mut self,
+        extra_headers: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> &mut Self {
+        self.commit.extra_headers = extra_headers;
         self
     }
 

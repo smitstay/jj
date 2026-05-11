@@ -675,6 +675,15 @@ fn commit_from_git_without_root_parent(
             sig: sig.into_owned().into(),
         });
 
+    // Collect non-reserved extra headers so embedders (e.g. Glyph) can read
+    // metadata they wrote via the extra_headers passthrough on write_commit.
+    let extra_headers = commit
+        .extra_headers
+        .iter()
+        .filter(|(k, _)| !is_reserved_extra_header(k))
+        .map(|(k, v)| (k.to_vec(), v.to_vec()))
+        .collect();
+
     Ok(Commit {
         parents,
         predecessors: vec![],
@@ -686,7 +695,20 @@ fn commit_from_git_without_root_parent(
         author,
         committer,
         secure_sig,
+        extra_headers,
     })
+}
+
+/// Headers jj writes to commit objects natively. Embedders must not collide
+/// with these; on read, they are parsed into their dedicated fields and not
+/// surfaced via `Commit::extra_headers`. On write, entries in
+/// `Commit::extra_headers` whose key matches one of these are silently
+/// dropped (they would have been overwritten by the dedicated field anyway).
+fn is_reserved_extra_header(key: &[u8]) -> bool {
+    matches!(
+        key,
+        b"change-id" | b"gpgsig" | b"gpgsig-sha256" | b"jj:trees" | b"jj:conflict-labels"
+    )
 }
 
 /// Extracts change id from commit headers.
@@ -1313,6 +1335,14 @@ impl Backend for GitBackend {
                 CHANGE_ID_COMMIT_HEADER.into(),
                 contents.change_id.reverse_hex().into(),
             ));
+        }
+        // Append embedder-supplied extra headers, filtering out any that
+        // collide with jj's reserved set (defensive — keeps the embedder
+        // surface from accidentally overwriting jj-managed headers).
+        for (k, v) in &contents.extra_headers {
+            if !is_reserved_extra_header(k) {
+                extra_headers.push((BString::from(k.clone()), BString::from(v.clone())));
+            }
         }
 
         if tree_ids.iter().any(|id| id == &self.empty_tree_id) {
@@ -1972,6 +2002,7 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
 
         let (initial_commit_id, _init_commit) = backend.write_commit(commit, None).block_on()?;
@@ -1993,6 +2024,116 @@ mod tests {
         assert_eq!(
             no_extra_commit.change_id, original_change_id,
             "The change-id header did not roundtrip"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn round_trip_extra_headers_via_git_object() -> TestResult {
+        let settings = user_settings();
+        let temp_dir = new_temp_dir();
+        let store_path = temp_dir.path().join("store");
+        fs::create_dir(&store_path)?;
+        let git_repo_path = temp_dir.path().join("git");
+        let git_repo = git_init(git_repo_path);
+
+        let backend = GitBackend::init_external(&settings, &store_path, git_repo.path())?;
+
+        let mut extra_headers = std::collections::BTreeMap::new();
+        extra_headers.insert(b"glyph:verdict-ref".to_vec(), b"refs/glyph/verdicts/abc".to_vec());
+        extra_headers.insert(b"glyph:provenance-ref".to_vec(), b"refs/glyph/provenance/abc".to_vec());
+        extra_headers.insert(b"glyph:actors".to_vec(), b"agent-claude,human:tay".to_vec());
+
+        let commit = Commit {
+            parents: vec![backend.root_commit_id().clone()],
+            predecessors: vec![],
+            root_tree: Merge::resolved(backend.empty_tree_id().clone()),
+            conflict_labels: Merge::resolved(String::new()),
+            change_id: ChangeId::from_hex("1111eeee1111eeee1111eeee1111eeee"),
+            description: "with extra headers".to_string(),
+            author: create_signature(),
+            committer: create_signature(),
+            secure_sig: None,
+            extra_headers: extra_headers.clone(),
+        };
+
+        let (commit_id, _written) = backend.write_commit(commit, None).block_on()?;
+        let read_back = backend.read_commit(&commit_id).block_on()?;
+
+        assert_eq!(
+            read_back.extra_headers, extra_headers,
+            "extra_headers did not round-trip through the git object"
+        );
+
+        // Reserved jj-managed headers must not leak into extra_headers on read,
+        // even though they live in gix's extra_headers vec.
+        for reserved in [
+            &b"change-id"[..],
+            &b"jj:trees"[..],
+            &b"jj:conflict-labels"[..],
+            &b"gpgsig"[..],
+            &b"gpgsig-sha256"[..],
+        ] {
+            assert!(
+                !read_back.extra_headers.contains_key(reserved),
+                "reserved header {:?} leaked into Commit::extra_headers",
+                std::str::from_utf8(reserved).unwrap()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extra_headers_filters_reserved_keys_on_write() -> TestResult {
+        let settings = user_settings();
+        let temp_dir = new_temp_dir();
+        let store_path = temp_dir.path().join("store");
+        fs::create_dir(&store_path)?;
+        let git_repo_path = temp_dir.path().join("git");
+        let git_repo = git_init(git_repo_path);
+
+        let backend = GitBackend::init_external(&settings, &store_path, git_repo.path())?;
+        let real_change_id = ChangeId::from_hex("aaaa1111aaaa1111aaaa1111aaaa1111");
+
+        // Caller tries to override jj-managed headers via extra_headers. The
+        // write path must drop these silently so the dedicated fields win.
+        let mut extra_headers = std::collections::BTreeMap::new();
+        extra_headers.insert(b"change-id".to_vec(), b"DEADBEEFDEADBEEFDEADBEEFDEADBEEF".to_vec());
+        extra_headers.insert(b"jj:trees".to_vec(), b"bogus".to_vec());
+        extra_headers.insert(b"glyph:keep-me".to_vec(), b"yes".to_vec());
+
+        let commit = Commit {
+            parents: vec![backend.root_commit_id().clone()],
+            predecessors: vec![],
+            root_tree: Merge::resolved(backend.empty_tree_id().clone()),
+            conflict_labels: Merge::resolved(String::new()),
+            change_id: real_change_id.clone(),
+            description: "filter test".to_string(),
+            author: create_signature(),
+            committer: create_signature(),
+            secure_sig: None,
+            extra_headers,
+        };
+
+        let (commit_id, _written) = backend.write_commit(commit, None).block_on()?;
+        let read_back = backend.read_commit(&commit_id).block_on()?;
+
+        assert_eq!(
+            read_back.change_id, real_change_id,
+            "extra_headers must not be able to override change-id"
+        );
+        assert_eq!(
+            read_back.extra_headers.get(&b"glyph:keep-me"[..].to_vec()),
+            Some(&b"yes".to_vec()),
+            "non-reserved extra header should round-trip"
+        );
+        assert!(
+            !read_back.extra_headers.contains_key(&b"change-id"[..].to_vec()),
+            "reserved header should not surface in extra_headers"
+        );
+        assert!(
+            !read_back.extra_headers.contains_key(&b"jj:trees"[..].to_vec()),
+            "reserved header should not surface in extra_headers"
         );
         Ok(())
     }
@@ -2063,6 +2204,7 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2151,6 +2293,7 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2256,6 +2399,7 @@ mod tests {
             author: signature.clone(),
             committer: signature,
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
         let commit_id = backend.write_commit(commit, None).block_on()?.0;
         let git_refs = git_repo.references()?;
@@ -2331,6 +2475,7 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
 
         let write_commit = |commit: Commit| -> BackendResult<(CommitId, Commit)> {
@@ -2372,6 +2517,7 @@ mod tests {
             author: create_signature(),
             committer: create_signature(),
             secure_sig: None,
+            extra_headers: std::collections::BTreeMap::new(),
         };
 
         let mut signer = |data: &_| {
