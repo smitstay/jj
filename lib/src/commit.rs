@@ -188,6 +188,12 @@ impl Commit {
         &self.data.committer
     }
 
+    /// Embedder-supplied extra headers attached to the commit object, beyond
+    /// the set jj writes natively. See [`backend::Commit::extra_headers`].
+    pub fn extra_headers(&self) -> &std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
+        &self.data.extra_headers
+    }
+
     ///  A commit is hidden if its commit id is not in the change id index.
     pub fn is_hidden(&self, repo: &dyn Repo) -> IndexResult<bool> {
         let maybe_targets = repo.resolve_change_id(self.change_id())?;
