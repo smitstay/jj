@@ -24,6 +24,8 @@ use crate::index::ReadonlyIndex;
 use crate::op_heads_store::OpHeadsStore;
 use crate::op_heads_store::OpHeadsStoreError;
 use crate::op_store;
+use crate::op_store::OpAttribute;
+use crate::op_store::OpAttributeError;
 use crate::op_store::OpStoreError;
 use crate::op_store::OperationMetadata;
 use crate::op_store::TimestampRange;
@@ -83,7 +85,22 @@ impl Transaction {
     }
 
     pub fn set_attribute(&mut self, key: String, value: String) {
-        self.op_metadata.attributes.insert(key, value);
+        self.op_metadata.set_str(key, value);
+    }
+
+    /// Encodes `value` via [`OpAttribute`] and stores it on the operation metadata.
+    pub fn set_attribute_typed<T: OpAttribute>(&mut self, key: impl Into<String>, value: &T) {
+        self.op_metadata.set(key, value);
+    }
+
+    /// Decodes the operation-metadata attribute at `key` as `T`.
+    ///
+    /// `None` if the key is absent; `Some(Err(_))` if decode fails.
+    pub fn get_attribute_typed<T: OpAttribute>(
+        &self,
+        key: &str,
+    ) -> Option<Result<T, OpAttributeError>> {
+        self.op_metadata.get(key)
     }
 
     pub fn repo(&self) -> &MutableRepo {
