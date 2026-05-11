@@ -428,6 +428,102 @@ pub struct OperationMetadata {
     pub attributes: BTreeMap<String, String>,
 }
 
+/// Strongly-typed view over a single `OperationMetadata::attributes` entry.
+///
+/// Implementors define how a value encodes to and decodes from the underlying
+/// `String` value. The wire format (the string map) is unchanged, so old
+/// clients still see the raw strings.
+pub trait OpAttribute: Sized {
+    fn encode(&self) -> String;
+    fn decode(s: &str) -> Result<Self, OpAttributeError>;
+}
+
+#[derive(Debug, Error)]
+#[error("failed to decode op attribute: {message}")]
+pub struct OpAttributeError {
+    pub message: String,
+}
+
+impl OpAttributeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl OpAttribute for String {
+    fn encode(&self) -> String {
+        self.clone()
+    }
+    fn decode(s: &str) -> Result<Self, OpAttributeError> {
+        Ok(s.to_owned())
+    }
+}
+
+impl OpAttribute for bool {
+    fn encode(&self) -> String {
+        if *self { "true" } else { "false" }.to_owned()
+    }
+    fn decode(s: &str) -> Result<Self, OpAttributeError> {
+        match s {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(OpAttributeError::new(format!("not a bool: {other}"))),
+        }
+    }
+}
+
+impl OpAttribute for i64 {
+    fn encode(&self) -> String {
+        self.to_string()
+    }
+    fn decode(s: &str) -> Result<Self, OpAttributeError> {
+        s.parse()
+            .map_err(|e| OpAttributeError::new(format!("not an i64: {e}")))
+    }
+}
+
+impl OpAttribute for u64 {
+    fn encode(&self) -> String {
+        self.to_string()
+    }
+    fn decode(s: &str) -> Result<Self, OpAttributeError> {
+        s.parse()
+            .map_err(|e| OpAttributeError::new(format!("not a u64: {e}")))
+    }
+}
+
+impl OperationMetadata {
+    /// Returns the raw string value of an attribute, if present.
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        self.attributes.get(key).map(String::as_str)
+    }
+
+    /// Writes a raw string attribute, replacing any prior value at the key.
+    pub fn set_str(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.attributes.insert(key.into(), value.into());
+    }
+
+    /// Returns `true` if the attribute key is present.
+    pub fn has(&self, key: &str) -> bool {
+        self.attributes.contains_key(key)
+    }
+
+    /// Decodes the attribute at `key` into `T`.
+    ///
+    /// Returns `None` if the key is absent. Returns `Some(Err(_))` if the key
+    /// is present but the value fails `T::decode`.
+    pub fn get<T: OpAttribute>(&self, key: &str) -> Option<Result<T, OpAttributeError>> {
+        self.attributes.get(key).map(|s| T::decode(s))
+    }
+
+    /// Encodes `value` via `T::encode` and stores it at `key`.
+    pub fn set<T: OpAttribute>(&mut self, key: impl Into<String>, value: &T) {
+        self.attributes.insert(key.into(), value.encode());
+    }
+}
+
 /// Data to be loaded into the root operation/view.
 #[derive(Clone, Debug)]
 pub struct RootOperationData {

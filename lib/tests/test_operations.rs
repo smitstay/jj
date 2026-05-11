@@ -1077,6 +1077,115 @@ fn test_gc() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn test_op_attribute_roundtrip_typed_view() {
+    let mut metadata = root_metadata();
+
+    metadata.set::<String>("desc", &"hello".to_string());
+    metadata.set::<bool>("flag-true", &true);
+    metadata.set::<bool>("flag-false", &false);
+    metadata.set::<i64>("count-i", &-42);
+    metadata.set::<u64>("count-u", &7);
+
+    assert_eq!(
+        metadata.get::<String>("desc").unwrap().unwrap(),
+        "hello".to_string()
+    );
+    assert!(metadata.get::<bool>("flag-true").unwrap().unwrap());
+    assert!(!metadata.get::<bool>("flag-false").unwrap().unwrap());
+    assert_eq!(metadata.get::<i64>("count-i").unwrap().unwrap(), -42);
+    assert_eq!(metadata.get::<u64>("count-u").unwrap().unwrap(), 7);
+
+    assert!(metadata.get::<String>("absent").is_none());
+    assert!(metadata.has("desc"));
+    assert!(!metadata.has("absent"));
+
+    metadata.set_str("raw-bool-key", "not-a-bool");
+    let err = metadata.get::<bool>("raw-bool-key").unwrap().unwrap_err();
+    assert!(err.message.contains("not a bool"));
+}
+
+#[test]
+fn test_op_attribute_typed_and_string_map_see_same_bytes() {
+    let mut metadata = root_metadata();
+
+    metadata.set::<i64>("n", &-123);
+    metadata.set::<bool>("b", &true);
+    assert_eq!(metadata.attributes.get("n").unwrap(), "-123");
+    assert_eq!(metadata.attributes.get("b").unwrap(), "true");
+
+    metadata
+        .attributes
+        .insert("m".to_string(), "999".to_string());
+    metadata
+        .attributes
+        .insert("s".to_string(), "raw".to_string());
+    assert_eq!(metadata.get::<u64>("m").unwrap().unwrap(), 999);
+    assert_eq!(metadata.get::<String>("s").unwrap().unwrap(), "raw");
+
+    assert_eq!(metadata.get_str("s"), Some("raw"));
+    metadata.set_str("s", "replaced");
+    assert_eq!(metadata.get_str("s"), Some("replaced"));
+}
+
+#[test]
+fn test_op_attribute_cross_version_compat_via_store() -> TestResult {
+    // Writing typed attributes via the new API must produce string-map entries
+    // that a client which only reads `attributes` directly can still parse.
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let mut tx = repo.start_transaction();
+    write_random_commit(tx.repo_mut());
+    let repo = tx.commit("seed").block_on()?;
+    let op_store = repo.op_store();
+
+    let mut data = repo.operation().store_operation().clone();
+    data.metadata.set::<bool>("typed-bool", &true);
+    data.metadata.set::<i64>("typed-i64", &-7);
+    data.metadata
+        .set::<String>("typed-string", &"hello".to_string());
+
+    let op_id = op_store.write_operation(&data).block_on()?;
+    let round_tripped = op_store.read_operation(&op_id).block_on()?;
+
+    let raw = &round_tripped.metadata.attributes;
+    assert_eq!(raw.get("typed-bool").map(String::as_str), Some("true"));
+    assert_eq!(raw.get("typed-i64").map(String::as_str), Some("-7"));
+    assert_eq!(raw.get("typed-string").map(String::as_str), Some("hello"));
+
+    assert!(round_tripped.metadata.get::<bool>("typed-bool").unwrap()?);
+    assert_eq!(round_tripped.metadata.get::<i64>("typed-i64").unwrap()?, -7);
+    assert_eq!(
+        round_tripped
+            .metadata
+            .get::<String>("typed-string")
+            .unwrap()?,
+        "hello"
+    );
+    Ok(())
+}
+
+fn root_metadata() -> jj_lib::op_store::OperationMetadata {
+    jj_lib::op_store::OperationMetadata {
+        time: jj_lib::op_store::TimestampRange {
+            start: jj_lib::backend::Timestamp {
+                timestamp: jj_lib::backend::MillisSinceEpoch(0),
+                tz_offset: 0,
+            },
+            end: jj_lib::backend::Timestamp {
+                timestamp: jj_lib::backend::MillisSinceEpoch(0),
+                tz_offset: 0,
+            },
+        },
+        description: String::new(),
+        hostname: String::new(),
+        username: String::new(),
+        is_snapshot: false,
+        workspace_name: None,
+        attributes: std::collections::BTreeMap::new(),
+    }
+}
+
 #[track_caller]
 fn extract_multiple_operations_error(
     error: &OpsetEvaluationError,
